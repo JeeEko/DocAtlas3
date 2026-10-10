@@ -94,6 +94,120 @@ function invokeModelOutcome(): RunOutcome {
   };
 }
 
+function unusableProposalOutcome(): RunOutcome {
+  return {
+    invokeModel: false,
+    check: {
+      name: "DocAtlas",
+      state: "red",
+      summary: "The proposal cannot be applied.",
+    },
+  };
+}
+
+function snapshotHasPath(
+  snapshot: PullRequestSnapshot,
+  filePath: string,
+): boolean {
+  const path = normalizePath(filePath);
+  return Object.keys(snapshot.files).some(
+    (key) => normalizePath(key) === path,
+  );
+}
+
+function lessonHeadingCount(lessons: string | null, heading: string): number {
+  if (lessons === null) {
+    return 0;
+  }
+  let count = 0;
+  for (const line of lessons.split(/\r?\n/)) {
+    const match = /^(#{1,6})[ \t]+(.*?)[ \t]*$/.exec(line);
+    if (match && match[2] === heading) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function publishedDocContent(
+  snapshot: PullRequestSnapshot,
+  docPath: string,
+): string | null {
+  const docs = publishedDocPaths(snapshot.overrideFile);
+  const contents = [
+    snapshot.publishedDocs.overview,
+    snapshot.publishedDocs.architecture,
+    snapshot.publishedDocs.glossary,
+  ];
+  const index = docs.indexOf(docPath);
+  if (index < 0) {
+    return null;
+  }
+  return contents[index];
+}
+
+function proposedDocContent(
+  files: Readonly<Record<string, string>>,
+  docPath: string,
+): string | null {
+  for (const [path, content] of Object.entries(files)) {
+    if (normalizePath(path) === docPath) {
+      return content;
+    }
+  }
+  return null;
+}
+
+function rejectUnusableProposal(
+  snapshot: PullRequestSnapshot,
+): RunOutcome | undefined {
+  if (snapshot.modelFailed) {
+    return unusableProposalOutcome();
+  }
+  const proposal = snapshot.proposal;
+  if (proposal === null) {
+    return undefined;
+  }
+  const docs = publishedDocPaths(snapshot.overrideFile);
+  for (const path of Object.keys(proposal.files)) {
+    if (!docs.includes(normalizePath(path))) {
+      return unusableProposalOutcome();
+    }
+  }
+  for (const section of proposal.sections) {
+    const sectionPath = normalizePath(section.path);
+    if (!docs.includes(sectionPath)) {
+      return unusableProposalOutcome();
+    }
+    const proposed = proposedDocContent(proposal.files, sectionPath);
+    if (proposed === null) {
+      return unusableProposalOutcome();
+    }
+    if (
+      lessonHeadingCount(proposed, section.heading) === 0 &&
+      lessonHeadingCount(
+        publishedDocContent(snapshot, sectionPath),
+        section.heading,
+      ) === 0
+    ) {
+      return unusableProposalOutcome();
+    }
+    if (
+      section.citation.kind === "path" &&
+      !snapshotHasPath(snapshot, section.citation.path)
+    ) {
+      return unusableProposalOutcome();
+    }
+    if (
+      section.citation.kind === "lesson" &&
+      lessonHeadingCount(snapshot.lessons, section.citation.heading) !== 1
+    ) {
+      return unusableProposalOutcome();
+    }
+  }
+  return undefined;
+}
+
 const OWN_DOC_COMMIT_MESSAGE = "docs: update for this pull request";
 
 const DEFAULT_OVERVIEW = "docs/overview.md";
@@ -309,12 +423,6 @@ function isDenylisted(
     return true;
   }
   return ignore.some((pattern) => pathMatches(pattern, path));
-}
-
-function rejectUnusableProposal(
-  _snapshot: PullRequestSnapshot,
-): RunOutcome | undefined {
-  return undefined;
 }
 
 type HeadingLine = {
