@@ -70,6 +70,11 @@ export type PullRequestSnapshot = {
   diff: string;
   proposal: ModelProposal | null;
   modelFailed: boolean;
+  /**
+   * Conflicts already commented on this pull request. Absent means none.
+   * The host supplies this; the snapshot does not store earlier comments.
+   */
+  commentedConflicts?: readonly LessonContradiction[];
 };
 
 function skippedOutcome(): RunOutcome {
@@ -726,6 +731,46 @@ function sameDoc(left: string, right: string): boolean {
   return left.replace(/\s+$/, "") === right.replace(/\s+$/, "");
 }
 
+function withNamedConflicts(
+  snapshot: PullRequestSnapshot,
+  outcome: RunOutcome,
+): RunOutcome {
+  const contradictions = snapshot.proposal?.contradictions ?? [];
+  if (contradictions.length === 0) {
+    return outcome;
+  }
+  const already = snapshot.commentedConflicts ?? [];
+  const fresh = contradictions.filter(
+    (conflict) =>
+      !already.some(
+        (prior) =>
+          prior.lessonHeading === conflict.lessonHeading &&
+          prior.file === conflict.file,
+      ),
+  );
+  return {
+    invokeModel: outcome.invokeModel,
+    check: {
+      name: "DocAtlas",
+      state: "red",
+      summary: outcome.check.summary,
+    },
+    ...(outcome.commit ? { commit: outcome.commit } : {}),
+    ...(fresh.length === 0
+      ? {}
+      : {
+          comment: {
+            body: fresh
+              .map(
+                (conflict) =>
+                  `${conflict.lessonHeading} contradicts ${conflict.file}`,
+              )
+              .join("\n"),
+          },
+        }),
+  };
+}
+
 function commitUsableProposal(
   snapshot: PullRequestSnapshot,
 ): RunOutcome | undefined {
@@ -741,7 +786,7 @@ function commitUsableProposal(
     return undefined;
   }
   if (snapshot.proposal.sections.length === 0) {
-    return skippedOutcome();
+    return withNamedConflicts(snapshot, skippedOutcome());
   }
   const slots = ["overview", "architecture", "glossary"] as const;
   const resolved = [];
@@ -831,7 +876,7 @@ function commitUsableProposal(
     return next !== undefined && (current === null || !sameDoc(current, next));
   });
   if (!changed) {
-    return skippedOutcome();
+    return withNamedConflicts(snapshot, skippedOutcome());
   }
   const files = slots.flatMap((slot, index) => {
     const next = rendered.get(slot);
@@ -844,7 +889,7 @@ function commitUsableProposal(
     }
     return [];
   });
-  return {
+  return withNamedConflicts(snapshot, {
     invokeModel: false,
     check: {
       name: "DocAtlas",
@@ -855,7 +900,7 @@ function commitUsableProposal(
       message: OWN_DOC_COMMIT_MESSAGE,
       files,
     },
-  };
+  });
 }
 
 export function decideRun(snapshot: PullRequestSnapshot): RunOutcome {
