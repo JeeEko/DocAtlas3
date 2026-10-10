@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test src/run-decision.test.ts"
+    "test": "node --test src/run-decision.test.ts src/run-decision.proposal.test.ts"
   }
 }
