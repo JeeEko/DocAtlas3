@@ -1,0 +1,8 @@
+{
+  "name": "docatlas",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test src/run-decision.test.ts"
+  }
+}
