@@ -1,30 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideRun, type PullRequestSnapshot } from "./run-decision.ts";
-
-function pullRequest(
-  overrides: Partial<PullRequestSnapshot>,
-): PullRequestSnapshot {
-  return {
-    draft: false,
-    headInSameRepository: true,
-    baseBranch: "main",
-    changedPaths: [],
-    commits: [],
-    publishedDocs: {
-      overview: null,
-      architecture: null,
-      glossary: null,
-    },
-    lessons: null,
-    overrideFile: null,
-    files: {},
-    diff: "",
-    proposal: null,
-    modelFailed: false,
-    ...overrides,
-  };
-}
+import { decideRun } from "./run-decision.ts";
+import { pullRequest } from "./pull-request-snapshot.ts";
 
 test("a proposal that reports lesson contradictions still publishes the code, stays red, and comments once with each new conflict", () => {
   const outcome = decideRun(
@@ -605,6 +582,113 @@ test("a lesson can add a claim the code does not mention, and that update stays 
             "# What it does\n\nPeople can write in on weekdays.\n\n# Entry points\n\nCall main.\n",
         },
       ],
+    },
+  });
+});
+
+test("a remaining lesson conflict stays red after DocAtlas's own doc commit and does not commit or comment again", () => {
+  const outcome = decideRun(
+    pullRequest({
+      changedPaths: ["src/billing.ts", "src/retry.ts", "docs/overview.md"],
+      commits: [
+        {
+          message: "docs: update for this pull request",
+          paths: ["docs/overview.md"],
+        },
+      ],
+      commentedConflicts: [
+        { lessonHeading: "Billing period", file: "src/billing.ts" },
+        { lessonHeading: "Retry window", file: "src/retry.ts" },
+      ],
+      publishedDocs: {
+        overview: "# What it does\n\nBilled monthly.\n\n# Entry points\n\nCall main.\n",
+        architecture:
+          "# Parts\n\nnone is shown\n\n# Relationships\n\nnone is shown\n\n# Data\n\nnone is shown\n",
+        glossary: "none is shown\n",
+      },
+      lessons: "# Billing period\n\nBilled yearly.\n\n# Retry window\n\nRetried forever.\n",
+      files: {
+        "src/billing.ts": 'export const period = "month";\n',
+        "src/retry.ts": "export const attempts = 2;\n",
+      },
+      proposal: {
+        files: {
+          "docs/overview.md":
+            "# What it does\n\nBilled monthly again.\n\n# Entry points\n\nCall main.\n",
+        },
+        sections: [
+          {
+            path: "docs/overview.md",
+            heading: "What it does",
+            citation: { kind: "path", path: "src/billing.ts" },
+          },
+        ],
+        contradictions: [
+          { lessonHeading: "Billing period", file: "src/billing.ts" },
+          { lessonHeading: "Retry window", file: "src/retry.ts" },
+          { lessonHeading: "Retry window", file: "src/billing.ts" },
+        ],
+      },
+    }),
+  );
+
+  assert.deepEqual(outcome, {
+    invokeModel: false,
+    check: {
+      name: "DocAtlas",
+      state: "red",
+      summary:
+        "Billing period contradicts src/billing.ts\nRetry window contradicts src/retry.ts",
+    },
+  });
+});
+
+test("DocAtlas's own doc commit stays green when no lesson conflict remains", () => {
+  const outcome = decideRun(
+    pullRequest({
+      changedPaths: ["src/billing.ts", "docs/overview.md"],
+      commits: [
+        {
+          message: "docs: update for this pull request",
+          paths: ["docs/overview.md"],
+        },
+      ],
+      commentedConflicts: [],
+      publishedDocs: {
+        overview: "# What it does\n\nBilled monthly.\n\n# Entry points\n\nCall main.\n",
+        architecture:
+          "# Parts\n\nnone is shown\n\n# Relationships\n\nnone is shown\n\n# Data\n\nnone is shown\n",
+        glossary: "none is shown\n",
+      },
+      lessons: "# Billing period\n\nBilled yearly.\n",
+      files: {
+        "src/billing.ts": 'export const period = "month";\n',
+      },
+      proposal: {
+        files: {
+          "docs/overview.md":
+            "# What it does\n\nBilled monthly again.\n\n# Entry points\n\nCall main.\n",
+        },
+        sections: [
+          {
+            path: "docs/overview.md",
+            heading: "What it does",
+            citation: { kind: "path", path: "src/billing.ts" },
+          },
+        ],
+        contradictions: [
+          { lessonHeading: "Billing period", file: "src/billing.ts" },
+        ],
+      },
+    }),
+  );
+
+  assert.deepEqual(outcome, {
+    invokeModel: false,
+    check: {
+      name: "DocAtlas",
+      state: "green",
+      summary: "No doc update was required.",
     },
   });
 });

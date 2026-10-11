@@ -110,28 +110,25 @@ function unusableProposalOutcome(): RunOutcome {
   };
 }
 
-function snapshotHasPath(
-  snapshot: PullRequestSnapshot,
+function recordValue(
+  files: Readonly<Record<string, string>>,
   filePath: string,
-): boolean {
+): string | undefined {
   const path = normalizePath(filePath);
-  return Object.keys(snapshot.files).some(
-    (key) => normalizePath(key) === path,
-  );
-}
-
-function lessonHeadingCount(lessons: string | null, heading: string): number {
-  if (lessons === null) {
-    return 0;
-  }
-  let count = 0;
-  for (const line of lessons.split(/\r?\n/)) {
-    const match = /^(#{1,6})[ \t]+(.*?)[ \t]*$/.exec(line);
-    if (match && match[2] === heading) {
-      count += 1;
+  for (const [key, content] of Object.entries(files)) {
+    if (normalizePath(key) === path) {
+      return content;
     }
   }
-  return count;
+  return undefined;
+}
+
+function headingCount(markdown: string | null, heading: string): number {
+  if (markdown === null) {
+    return 0;
+  }
+  return headingLines(markdown).filter((item) => item.heading === heading)
+    .length;
 }
 
 function publishedDocContent(
@@ -151,16 +148,29 @@ function publishedDocContent(
   return contents[index];
 }
 
-function proposedDocContent(
-  files: Readonly<Record<string, string>>,
-  docPath: string,
-): string | null {
-  for (const [path, content] of Object.entries(files)) {
-    if (normalizePath(path) === docPath) {
-      return content;
+type ResolvedCitation =
+  | { kind: "path"; path: string }
+  | { kind: "lesson"; heading: string };
+
+function citationText(citation: ResolvedCitation): string {
+  return citation.kind === "path" ? citation.path : citation.heading;
+}
+
+function resolvedCitation(
+  snapshot: PullRequestSnapshot,
+  citation: Citation,
+): ResolvedCitation | undefined {
+  if (citation.kind === "path") {
+    const path = normalizePath(citation.path);
+    if (recordValue(snapshot.files, path) === undefined) {
+      return undefined;
     }
+    return { kind: "path", path };
   }
-  return null;
+  if (headingCount(snapshot.lessons, citation.heading) !== 1) {
+    return undefined;
+  }
+  return { kind: "lesson", heading: citation.heading };
 }
 
 function rejectUnusableProposal(
@@ -184,29 +194,20 @@ function rejectUnusableProposal(
     if (!docs.includes(sectionPath)) {
       return unusableProposalOutcome();
     }
-    const proposed = proposedDocContent(proposal.files, sectionPath);
-    if (proposed === null) {
+    const proposed = recordValue(proposal.files, sectionPath);
+    if (proposed === undefined) {
       return unusableProposalOutcome();
     }
     if (
-      lessonHeadingCount(proposed, section.heading) === 0 &&
-      lessonHeadingCount(
+      headingCount(proposed, section.heading) === 0 &&
+      headingCount(
         publishedDocContent(snapshot, sectionPath),
         section.heading,
       ) === 0
     ) {
       return unusableProposalOutcome();
     }
-    if (
-      section.citation.kind === "path" &&
-      !snapshotHasPath(snapshot, section.citation.path)
-    ) {
-      return unusableProposalOutcome();
-    }
-    if (
-      section.citation.kind === "lesson" &&
-      lessonHeadingCount(snapshot.lessons, section.citation.heading) !== 1
-    ) {
+    if (!resolvedCitation(snapshot, section.citation)) {
       return unusableProposalOutcome();
     }
   }
@@ -439,9 +440,10 @@ type HeadingLine = {
 function headingLines(markdown: string): HeadingLine[] {
   const headings: HeadingLine[] = [];
   let offset = 0;
-  const lines = markdown.split("\n");
+  const lines = markdown.split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
-    const match = /^(#{1,6})[ \t]+(.*?)[ \t]*$/.exec(lines[index]);
+    const line = lines[index];
+    const match = /^(#{1,6})[ \t]+(.*?)[ \t]*$/.exec(line);
     if (match) {
       headings.push({
         level: match[1].length,
@@ -449,19 +451,28 @@ function headingLines(markdown: string): HeadingLine[] {
         start: offset,
       });
     }
-    offset += lines[index].length;
+    offset += line.length;
     if (index < lines.length - 1) {
-      offset += 1;
+      offset += markdown.startsWith("\r\n", offset) ? 2 : 1;
     }
   }
   return headings;
+}
+
+function withTrailingNewline(text: string): string {
+  return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+function withTrailingBlankLine(text: string): string {
+  const padded = withTrailingNewline(text);
+  return padded.endsWith("\n\n") ? padded : `${padded}\n`;
 }
 
 function headingAt(markdown: string, heading: string): HeadingLine | null {
   return headingLines(markdown).find((item) => item.heading === heading) ?? null;
 }
 
-function directBodySpan(
+function sectionBodySpan(
   markdown: string,
   heading: string,
 ): { start: number; end: number } | null {
@@ -475,34 +486,29 @@ function directBodySpan(
   const sectionEnd =
     headings.find((item) => item.start > found.start && item.level <= found.level)
       ?.start ?? markdown.length;
-  const child = headings.find(
-    (item) => item.start > found.start && item.start < sectionEnd && item.level > found.level,
-  );
-  return { start: bodyStart, end: child?.start ?? sectionEnd };
+  return { start: bodyStart, end: sectionEnd };
 }
 
-function replaceDirectBody(
+function replaceSectionBody(
   content: string,
   heading: string,
   proposed: string,
 ): string | null {
-  const currentBody = directBodySpan(content, heading);
-  const proposedBody = directBodySpan(proposed, heading);
+  const currentBody = sectionBodySpan(content, heading);
+  const proposedBody = sectionBodySpan(proposed, heading);
   if (!currentBody || !proposedBody) {
     return null;
   }
   let body = proposed.slice(proposedBody.start, proposedBody.end);
+  if (body.trim() === "") {
+    body = "\nnone is shown\n";
+  }
   const after = content.slice(currentBody.end);
   if (after !== "") {
-    if (!body.endsWith("\n")) {
-      body += "\n";
-    }
-    if (!body.endsWith("\n\n")) {
-      body += "\n";
-    }
+    body = withTrailingBlankLine(body);
   }
   const next = content.slice(0, currentBody.start) + body + after;
-  return fillEmptyTopLevel(next.endsWith("\n") ? next : `${next}\n`);
+  return withTrailingNewline(next);
 }
 
 function parentHeading(markdown: string, heading: string): string | null {
@@ -526,19 +532,13 @@ function appendGlossaryTerm(
   if (!span) {
     return null;
   }
-  let middle = proposed.slice(span.start, span.end);
-  if (!middle.endsWith("\n")) {
-    middle += "\n";
-  }
+  const proposedSection = withTrailingNewline(
+    proposed.slice(span.start, span.end),
+  );
   if (content.trim() === "" || content.trim() === "none is shown") {
-    return middle;
+    return proposedSection;
   }
-  const base = content.endsWith("\n\n")
-    ? content
-    : content.endsWith("\n")
-      ? `${content}\n`
-      : `${content}\n\n`;
-  return base + middle;
+  return withTrailingBlankLine(content) + proposedSection;
 }
 
 function removeSection(content: string, heading: string): string | null {
@@ -561,16 +561,17 @@ function insertSubsection(
   if (!parentSpan || !proposedSpan) {
     return null;
   }
-  let middle = proposed.slice(proposedSpan.start, proposedSpan.end);
-  if (!middle.endsWith("\n")) {
-    middle += "\n";
-  }
-  if (parentSpan.end < content.length && !middle.endsWith("\n\n")) {
-    middle += "\n";
+  let proposedSection = withTrailingNewline(
+    proposed.slice(proposedSpan.start, proposedSpan.end),
+  );
+  if (parentSpan.end < content.length) {
+    proposedSection = withTrailingBlankLine(proposedSection);
   }
   const next =
-    content.slice(0, parentSpan.end) + middle + content.slice(parentSpan.end);
-  return next.endsWith("\n") ? next : `${next}\n`;
+    content.slice(0, parentSpan.end) +
+    proposedSection +
+    content.slice(parentSpan.end);
+  return withTrailingNewline(next);
 }
 
 function sectionSpan(
@@ -639,10 +640,7 @@ function ensureRequiredHeadings(
       if (next.trim() === "" || next.trim() === "none is shown") {
         next = block;
       } else {
-        if (!block.endsWith("\n\n")) {
-          block += "\n";
-        }
-        next = block + next;
+        next = withTrailingBlankLine(block) + next;
       }
       continue;
     }
@@ -651,87 +649,26 @@ function ensureRequiredHeadings(
       continue;
     }
     if (span.end === next.length) {
-      if (!next.endsWith("\n")) {
-        next += "\n";
-      }
-      if (!next.endsWith("\n\n")) {
-        next += "\n";
-      }
-      next += block;
+      next = withTrailingBlankLine(next) + block;
       continue;
     }
-    if (!block.endsWith("\n\n")) {
-      block += "\n";
-    }
-    next = next.slice(0, span.end) + block + next.slice(span.end);
+    next =
+      next.slice(0, span.end) +
+      withTrailingBlankLine(block) +
+      next.slice(span.end);
   }
-  return next.endsWith("\n") ? next : `${next}\n`;
-}
-
-function fillEmptyTopLevel(markdown: string): string {
-  const headings = headingLines(markdown).filter((item) => item.level === 1);
-  if (headings.length === 0) {
-    return markdown;
-  }
-  let filled = "";
-  let cursor = 0;
-  for (let index = 0; index < headings.length; index += 1) {
-    const heading = headings[index];
-    const lineEnd = markdown.indexOf("\n", heading.start);
-    const bodyStart = lineEnd === -1 ? markdown.length : lineEnd + 1;
-    const bodyEnd = headings[index + 1]?.start ?? markdown.length;
-    filled += markdown.slice(cursor, bodyStart);
-    const body = markdown.slice(bodyStart, bodyEnd);
-    if (body.trim() === "") {
-      filled += headings[index + 1]
-        ? "\nnone is shown\n\n"
-        : "\nnone is shown\n";
-    } else {
-      filled += body;
-    }
-    cursor = bodyEnd;
-  }
-  return filled + markdown.slice(cursor);
-}
-
-function proposalFile(
-  proposal: ModelProposal,
-  filePath: string,
-): string | undefined {
-  const path = normalizePath(filePath);
-  for (const [key, content] of Object.entries(proposal.files)) {
-    if (normalizePath(key) === path) {
-      return content;
-    }
-  }
-  return undefined;
-}
-
-function citationSource(
-  snapshot: PullRequestSnapshot,
-  citation: Citation,
-): string | undefined {
-  if (citation.kind === "path") {
-    const path = normalizePath(citation.path);
-    const exists = Object.keys(snapshot.files).some(
-      (key) => normalizePath(key) === path,
-    );
-    return exists ? path : undefined;
-  }
-  if (snapshot.lessons === null) {
-    return undefined;
-  }
-  const matches = headingLines(snapshot.lessons).filter(
-    (item) => item.heading === citation.heading,
-  );
-  return matches.length === 1 ? citation.heading : undefined;
+  return withTrailingNewline(next);
 }
 
 function sameDoc(left: string, right: string): boolean {
   return left.replace(/\s+$/, "") === right.replace(/\s+$/, "");
 }
 
-function withNamedConflicts(
+function conflictSentence(conflict: LessonContradiction): string {
+  return `${conflict.lessonHeading} contradicts ${conflict.file}`;
+}
+
+function keepCheckRedAndCommentOnlyNewConflicts(
   snapshot: PullRequestSnapshot,
   outcome: RunOutcome,
 ): RunOutcome {
@@ -760,12 +697,7 @@ function withNamedConflicts(
       ? {}
       : {
           comment: {
-            body: fresh
-              .map(
-                (conflict) =>
-                  `${conflict.lessonHeading} contradicts ${conflict.file}`,
-              )
-              .join("\n"),
+            body: fresh.map(conflictSentence).join("\n"),
           },
         }),
   };
@@ -786,12 +718,12 @@ function commitUsableProposal(
     return undefined;
   }
   if (snapshot.proposal.sections.length === 0) {
-    return withNamedConflicts(snapshot, skippedOutcome());
+    return keepCheckRedAndCommentOnlyNewConflicts(snapshot, skippedOutcome());
   }
   const slots = ["overview", "architecture", "glossary"] as const;
   const resolved = [];
   for (const section of snapshot.proposal.sections) {
-    const source = citationSource(snapshot, section.citation);
+    const source = resolvedCitation(snapshot, section.citation);
     const slot = publishedSlot(section.path, snapshot.overrideFile);
     if (!source || !slot) {
       return undefined;
@@ -805,10 +737,14 @@ function commitUsableProposal(
     if (changes.length === 0) {
       continue;
     }
-    const proposed = proposalFile(snapshot.proposal, published[slots.indexOf(slot)]);
+    const proposed = recordValue(
+      snapshot.proposal.files,
+      published[slots.indexOf(slot)],
+    );
     let content = snapshot.publishedDocs[slot] ?? PUBLISHED_OUTLINE[slot];
+    const original = content;
     const originalOrder = headingLines(content).map((item) => item.heading);
-    const applied = new Map<string, string>();
+    const applied = new Map<string, ResolvedCitation>();
     for (const change of changes) {
       const existing = headingAt(content, change.section.heading);
       const proposedHeading =
@@ -817,7 +753,7 @@ function commitUsableProposal(
           : headingAt(proposed, change.section.heading);
       let next: string | null = null;
       if (existing && proposedHeading && proposed !== undefined) {
-        next = replaceDirectBody(content, change.section.heading, proposed);
+        next = replaceSectionBody(content, change.section.heading, proposed);
       } else if (existing && !proposedHeading && existing.level > 1) {
         next = removeSection(content, change.section.heading);
       } else if (!existing && proposedHeading && proposed) {
@@ -839,6 +775,25 @@ function commitUsableProposal(
         applied.set(change.section.heading, change.source);
         content = next;
       }
+    }
+    for (const change of changes) {
+      const heading = change.section.heading;
+      if (applied.has(heading)) {
+        continue;
+      }
+      const before = sectionSpan(original, heading);
+      const after = sectionSpan(content, heading);
+      const beforeText = before ? original.slice(before.start, before.end) : null;
+      const afterText = after ? content.slice(after.start, after.end) : null;
+      if (
+        beforeText === afterText ||
+        (beforeText !== null &&
+          afterText !== null &&
+          sameDoc(beforeText, afterText))
+      ) {
+        continue;
+      }
+      applied.set(heading, change.source);
     }
     if (applied.size > 0) {
       content = ensureRequiredHeadings(content, slot);
@@ -865,7 +820,7 @@ function commitUsableProposal(
     for (const heading of summaryHeadings) {
       const source = applied.get(heading);
       if (source) {
-        summaries.push(`${heading} (${source})`);
+        summaries.push(`${heading} (${citationText(source)})`);
       }
     }
     rendered.set(slot, content);
@@ -876,7 +831,7 @@ function commitUsableProposal(
     return next !== undefined && (current === null || !sameDoc(current, next));
   });
   if (!changed) {
-    return withNamedConflicts(snapshot, skippedOutcome());
+    return keepCheckRedAndCommentOnlyNewConflicts(snapshot, skippedOutcome());
   }
   const files = slots.flatMap((slot, index) => {
     const next = rendered.get(slot);
@@ -889,7 +844,7 @@ function commitUsableProposal(
     }
     return [];
   });
-  return withNamedConflicts(snapshot, {
+  return keepCheckRedAndCommentOnlyNewConflicts(snapshot, {
     invokeModel: false,
     check: {
       name: "DocAtlas",
@@ -917,7 +872,18 @@ export function decideRun(snapshot: PullRequestSnapshot): RunOutcome {
       (commit) => commit.message.trim() === OWN_DOC_COMMIT_MESSAGE,
     )
   ) {
-    return skippedOutcome();
+    const remaining = snapshot.commentedConflicts ?? [];
+    if (remaining.length === 0) {
+      return skippedOutcome();
+    }
+    return {
+      invokeModel: false,
+      check: {
+        name: "DocAtlas",
+        state: "red",
+        summary: remaining.map(conflictSentence).join("\n"),
+      },
+    };
   }
   if (snapshot.proposal !== null || snapshot.modelFailed) {
     return (

@@ -1,30 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideRun, type PullRequestSnapshot } from "./run-decision.ts";
-
-function pullRequest(
-  overrides: Partial<PullRequestSnapshot>,
-): PullRequestSnapshot {
-  return {
-    draft: false,
-    headInSameRepository: true,
-    baseBranch: "main",
-    changedPaths: [],
-    commits: [],
-    publishedDocs: {
-      overview: null,
-      architecture: null,
-      glossary: null,
-    },
-    lessons: null,
-    overrideFile: null,
-    files: {},
-    diff: "",
-    proposal: null,
-    modelFailed: false,
-    ...overrides,
-  };
-}
+import { decideRun } from "./run-decision.ts";
+import { pullRequest } from "./pull-request-snapshot.ts";
 
 test("a usable proposal commits the cited section and leaves every other section untouched", () => {
   const outcome = decideRun(
@@ -310,7 +287,117 @@ test("a top-level heading is not renamed", () => {
   });
 });
 
-test("subsections are added under Parts only when each cites a resolved source", () => {
+test("replacing a cited section replaces its nested subsections and leaves the next sibling untouched", () => {
+  const outcome = decideRun(
+    pullRequest({
+      changedPaths: ["packages/web/package.json"],
+      publishedDocs: {
+        overview: "# What it does\n\nServes files.\n\n# Entry points\n\nCall main.\n",
+        architecture: [
+          "# Parts",
+          "",
+          "Two packages.",
+          "",
+          "## Web",
+          "",
+          "The old web package.",
+          "",
+          "## Api",
+          "",
+          "The old api package.",
+          "",
+          "# Relationships",
+          "",
+          "Keep this sibling.",
+          "",
+          "# Data",
+          "",
+          "none is shown",
+          "",
+        ].join("\n"),
+        glossary: "none is shown\n",
+      },
+      files: {
+        "packages/web/package.json": "{}\n",
+      },
+      proposal: {
+        files: {
+          "docs/architecture.md": [
+            "# Parts",
+            "",
+            "Three packages.",
+            "",
+            "## Web",
+            "",
+            "The new web package.",
+            "",
+            "## Gateway",
+            "",
+            "The new gateway.",
+            "",
+            "# Relationships",
+            "",
+            "Do not copy this sibling.",
+            "",
+            "# Data",
+            "",
+            "Do not copy this either.",
+            "",
+          ].join("\n"),
+        },
+        sections: [
+          {
+            path: "docs/architecture.md",
+            heading: "Parts",
+            citation: { kind: "path", path: "packages/web/package.json" },
+          },
+        ],
+        contradictions: [],
+      },
+    }),
+  );
+
+  assert.deepEqual(outcome, {
+    invokeModel: false,
+    check: {
+      name: "DocAtlas",
+      state: "green",
+      summary: "Parts (packages/web/package.json)",
+    },
+    commit: {
+      message: "docs: update for this pull request",
+      files: [
+        {
+          path: "docs/architecture.md",
+          content: [
+            "# Parts",
+            "",
+            "Three packages.",
+            "",
+            "## Web",
+            "",
+            "The new web package.",
+            "",
+            "## Gateway",
+            "",
+            "The new gateway.",
+            "",
+            "# Relationships",
+            "",
+            "Keep this sibling.",
+            "",
+            "# Data",
+            "",
+            "none is shown",
+            "",
+          ].join("\n"),
+        },
+      ],
+    },
+  });
+});
+
+test("a cited Parts section includes nested subsections proposed inside it", () => {
   const outcome = decideRun(
     pullRequest({
       changedPaths: ["packages/web/package.json", "packages/api/package.json"],
@@ -402,6 +489,10 @@ test("subsections are added under Parts only when each cites a resolved source",
             "",
             "The api package.",
             "",
+            "## Cli",
+            "",
+            "The cli package.",
+            "",
             "# Relationships",
             "",
             "none is shown",
@@ -417,7 +508,7 @@ test("subsections are added under Parts only when each cites a resolved source",
   });
 });
 
-test("a subsection is removed only when the proposal cites it", () => {
+test("replacing a cited section drops nested subsections the proposal omits", () => {
   const outcome = decideRun(
     pullRequest({
       changedPaths: ["packages/web/package.json"],
@@ -502,10 +593,6 @@ test("a subsection is removed only when the proposal cites it", () => {
             "# Parts",
             "",
             "One package.",
-            "",
-            "## Api",
-            "",
-            "The api package.",
             "",
             "# Relationships",
             "",
@@ -618,6 +705,55 @@ test("each glossary term keeps its own heading", () => {
         {
           path: "docs/glossary.md",
           content: "# Atlas\n\nThe published set.\n\n# Snapshot\n\nThe pull request view.\n",
+        },
+      ],
+    },
+  });
+});
+
+test("editing one section leaves an empty uncited section as it is", () => {
+  const outcome = decideRun(
+    pullRequest({
+      changedPaths: ["src/app.ts"],
+      publishedDocs: {
+        overview: "# What it does\n\nServes files.\n\n# Entry points\n\nCall main.\n",
+        architecture: "# Parts\n\n# Relationships\n\nCalls the web package.\n\n# Data\n\nStores nothing.\n",
+        glossary: "none is shown\n",
+      },
+      files: {
+        "src/app.ts": "export function main() {}\n",
+      },
+      proposal: {
+        files: {
+          "docs/architecture.md":
+            "# Parts\n\n# Relationships\n\nCalls the api.\n\n# Data\n\nStores nothing.\n",
+        },
+        sections: [
+          {
+            path: "docs/architecture.md",
+            heading: "Relationships",
+            citation: { kind: "path", path: "src/app.ts" },
+          },
+        ],
+        contradictions: [],
+      },
+    }),
+  );
+
+  assert.deepEqual(outcome, {
+    invokeModel: false,
+    check: {
+      name: "DocAtlas",
+      state: "green",
+      summary: "Relationships (src/app.ts)",
+    },
+    commit: {
+      message: "docs: update for this pull request",
+      files: [
+        {
+          path: "docs/architecture.md",
+          content:
+            "# Parts\n\n# Relationships\n\nCalls the api.\n\n# Data\n\nStores nothing.\n",
         },
       ],
     },

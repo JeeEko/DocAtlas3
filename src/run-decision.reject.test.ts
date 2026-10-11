@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideRun, type PullRequestSnapshot } from "./run-decision.ts";
+import { decideRun } from "./run-decision.ts";
+import { pullRequest } from "./pull-request-snapshot.ts";
 
 const rejected = {
   invokeModel: false,
@@ -10,30 +11,6 @@ const rejected = {
     summary: "The proposal cannot be applied.",
   },
 };
-
-function pullRequest(
-  overrides: Partial<PullRequestSnapshot>,
-): PullRequestSnapshot {
-  return {
-    draft: false,
-    headInSameRepository: true,
-    baseBranch: "main",
-    changedPaths: [],
-    commits: [],
-    publishedDocs: {
-      overview: null,
-      architecture: null,
-      glossary: null,
-    },
-    lessons: null,
-    overrideFile: null,
-    files: {},
-    diff: "",
-    proposal: null,
-    modelFailed: false,
-    ...overrides,
-  };
-}
 
 test("a changed section that cites a path missing from the snapshot writes nothing, fails DocAtlas, and posts no comment", () => {
   const outcome = decideRun(

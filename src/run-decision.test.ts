@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideRun, type PullRequestSnapshot } from "./run-decision.ts";
+import { decideRun } from "./run-decision.ts";
+import { pullRequest } from "./pull-request-snapshot.ts";
 
 const skipped = {
   invokeModel: false,
@@ -10,30 +11,6 @@ const skipped = {
     summary: "No doc update was required.",
   },
 };
-
-function pullRequest(
-  overrides: Partial<PullRequestSnapshot>,
-): PullRequestSnapshot {
-  return {
-    draft: false,
-    headInSameRepository: true,
-    baseBranch: "main",
-    changedPaths: [],
-    commits: [],
-    publishedDocs: {
-      overview: null,
-      architecture: null,
-      glossary: null,
-    },
-    lessons: null,
-    overrideFile: null,
-    files: {},
-    diff: "",
-    proposal: null,
-    modelFailed: false,
-    ...overrides,
-  };
-}
 
 test("a draft pull request does not invoke the model and does not fail DocAtlas", () => {
   const outcome = decideRun(
